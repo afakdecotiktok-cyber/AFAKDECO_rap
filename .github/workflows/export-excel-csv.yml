@@ -1,0 +1,94 @@
+name: Export Excel sheets to CSV
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Rapprochement sfa.log qte et prix.xlsm"
+      - ".github/workflows/export-excel-csv.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Excel reader
+        run: python -m pip install --disable-pip-version-check openpyxl
+
+      - name: Export every worksheet
+        run: |
+          python - <<'PY'
+          import csv
+          import re
+          from pathlib import Path
+          from openpyxl import load_workbook
+
+          source = Path("Rapprochement sfa.log qte et prix.xlsm")
+          if not source.is_file():
+              raise SystemExit(f"Workbook not found: {source}")
+
+          out = Path("exports")
+          out.mkdir(exist_ok=True)
+
+          # Read twice: cached/calculated values and original formulas.
+          values_wb = load_workbook(source, read_only=True, data_only=True, keep_links=False)
+          formulas_wb = load_workbook(source, read_only=True, data_only=False, keep_links=False)
+
+          manifest = [
+              "# Excel export",
+              "",
+              f"Source: `{source.name}`",
+              "",
+              "Each worksheet is exported twice: *_values.csv contains cached cell values; *_formulas.csv contains formulas where present.",
+              "Hidden worksheets are included. The original XLSM file is not modified.",
+              "",
+              "| Sheet | Visibility | Rows | Columns |",
+              "|---|---|---:|---:|",
+          ]
+
+          def safe_name(name):
+              cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+              return cleaned or "sheet"
+
+          for index, (values_ws, formulas_ws) in enumerate(zip(values_wb.worksheets, formulas_wb.worksheets), start=1):
+              stem = f"{index:02d}_{safe_name(values_ws.title)}"
+              for ws, suffix in ((values_ws, "values"), (formulas_ws, "formulas")):
+                  target = out / f"{stem}_{suffix}.csv"
+                  with target.open("w", encoding="utf-8-sig", newline="") as handle:
+                      writer = csv.writer(handle, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                      for row in ws.iter_rows(values_only=True):
+                          writer.writerow(["" if value is None else value for value in row])
+
+              manifest.append(
+                  f"| {values_ws.title.replace('|', '\\|')} | {values_ws.sheet_state} | "
+                  f"{values_ws.max_row} | {values_ws.max_column} |"
+              )
+
+          values_wb.close()
+          formulas_wb.close()
+          (out / "README.md").write_text("\n".join(manifest) + "\n", encoding="utf-8")
+          PY
+
+      - name: Commit exported CSV files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add exports/
+          if git diff --cached --quiet; then
+            echo "No export changes to commit."
+          else
+            git commit -m "Export Excel worksheets to CSV"
+            git push
+          fi
